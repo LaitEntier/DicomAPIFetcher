@@ -33,8 +33,8 @@ module_dir = os.path.dirname(os.path.abspath(__file__))
 if module_dir not in sys.path:
     sys.path.insert(0, module_dir)
 
-from ApiClient import ManifestApiClient, ZipApiClient
-from DicomApiFetcherLogic import DicomApiFetcherLogic
+from DicomApiFetcherLib.ApiClient import ManifestApiClient, ZipApiClient
+from DicomApiFetcherLib.DicomApiFetcherLogic import DicomApiFetcherLogic
 
 
 # -----------------------------------------------------------------------------
@@ -48,7 +48,7 @@ class DicomApiFetcher(ScriptedLoadableModule):
         self.parent.title = "DICOM API Fetcher"
         self.parent.categories = ["DICOM"]
         self.parent.dependencies = []
-        self.parent.contributors = ["Your Name"]
+        self.parent.contributors = [ '<a href="https://github.com/LaitEntier">Lait Entier</a>']
         self.parent.helpText = (
             "Fetch DICOM images from a remote HTTP API and load them into Slicer."
         )

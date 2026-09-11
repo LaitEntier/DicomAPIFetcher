@@ -4,8 +4,9 @@ set(MODULE_TITLE "DICOM API Fetcher")
 #-----------------------------------------------------------------------------
 set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}.py
-  ${MODULE_NAME}Logic.py
-  ApiClient.py
+  ${MODULE_NAME}Lib/__init__.py
+  ${MODULE_NAME}Lib/ApiClient.py
+  ${MODULE_NAME}Lib/${MODULE_NAME}Logic.py
 )
 
 set(MODULE_PYTHON_RESOURCES
