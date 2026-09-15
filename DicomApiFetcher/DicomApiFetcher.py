@@ -70,6 +70,7 @@ class DicomApiFetcherWidget(ScriptedLoadableModuleWidget):
     SETTINGS_TOKEN = "DicomApiFetcher/token"
     SETTINGS_TOKEN_MODE = "DicomApiFetcher/tokenMode"
     SETTINGS_TOKEN_NAME = "DicomApiFetcher/tokenName"
+    SETTINGS_IGNORE_SSL = "DicomApiFetcher/ignoreSslErrors"
 
     def __init__(self, parent=None):
         ScriptedLoadableModuleWidget.__init__(self, parent)
@@ -91,6 +92,12 @@ class DicomApiFetcherWidget(ScriptedLoadableModuleWidget):
             "https://recharme-pr01:8443/ArchiMed3-web"
         )
         config_layout.addRow("API base URL:", self.baseUrlLineEdit)
+
+        self.ignoreSslCheckBox = qt.QCheckBox(
+            "Ignore SSL certificate errors (self-signed certificate)"
+        )
+        self.ignoreSslCheckBox.setChecked(True)
+        config_layout.addRow(self.ignoreSslCheckBox)
 
         self.clientTypeComboBox = qt.QComboBox()
         self.clientTypeComboBox.addItem("ZIP archive", "zip")
@@ -206,6 +213,8 @@ class DicomApiFetcherWidget(ScriptedLoadableModuleWidget):
         token_mode_index = self._tokenModeIndex(token_mode)
         self.tokenModeComboBox.currentIndex = token_mode_index
         self.tokenNameLineEdit.text = settings.value(self.SETTINGS_TOKEN_NAME, "")
+        ignore_ssl = settings.value(self.SETTINGS_IGNORE_SSL, "true")
+        self.ignoreSslCheckBox.setChecked(str(ignore_ssl).lower() != "false")
 
     def _saveSettings(self):
         """Persist current settings."""
@@ -226,6 +235,10 @@ class DicomApiFetcherWidget(ScriptedLoadableModuleWidget):
             self.SETTINGS_TOKEN_MODE, self.tokenModeComboBox.currentData
         )
         settings.setValue(self.SETTINGS_TOKEN_NAME, self.tokenNameLineEdit.text)
+        settings.setValue(
+            self.SETTINGS_IGNORE_SSL,
+            "true" if self.ignoreSslCheckBox.isChecked() else "false",
+        )
 
     def _tokenModeIndex(self, mode):
         """Return the combo-box index for *mode*."""
@@ -245,6 +258,7 @@ class DicomApiFetcherWidget(ScriptedLoadableModuleWidget):
         client.token = self.tokenLineEdit.text.strip()
         client.token_mode = self.tokenModeComboBox.currentData
         client.token_name = self.tokenNameLineEdit.text.strip()
+        client.verify_ssl = not self.ignoreSslCheckBox.isChecked()
         return client
 
     def _ensureBaseUrl(self):

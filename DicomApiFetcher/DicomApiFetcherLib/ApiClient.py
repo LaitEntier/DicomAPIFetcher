@@ -61,6 +61,7 @@ Manifest fetch endpoint::
 import json
 import os
 import shutil
+import ssl
 import urllib.request
 import zipfile
 from abc import ABCMeta, abstractmethod
@@ -73,11 +74,19 @@ class BaseApiClient(metaclass=ABCMeta):
     DEFAULT_LIST_ENDPOINT = "/"
     DEFAULT_FETCH_ENDPOINT = "/{id}"
 
-    def __init__(self, timeout=60, token=None, token_mode="none", token_name=None):
+    def __init__(
+        self,
+        timeout=60,
+        token=None,
+        token_mode="none",
+        token_name=None,
+        verify_ssl=True,
+    ):
         self.timeout = timeout
         self.token = token or ""
         self.token_mode = (token_mode or "none").lower()
         self.token_name = token_name or ""
+        self.verify_ssl = verify_ssl
 
     def login(self, base_url, username, password, login_endpoint="/api/login"):
         """
@@ -98,7 +107,7 @@ class BaseApiClient(metaclass=ABCMeta):
                 "Accept": "application/json",
             },
         )
-        with urllib.request.urlopen(request, timeout=self.timeout) as response:
+        with self._urlopen(request) as response:
             body = response.read().decode("utf-8")
 
         try:
@@ -112,6 +121,20 @@ class BaseApiClient(metaclass=ABCMeta):
 
         self.token = str(token)
         return self.token
+
+    def _ssl_context(self):
+        """Return an unverified SSL context when certificate checks are off."""
+        if self.verify_ssl:
+            return None
+        return ssl._create_unverified_context()
+
+    def _urlopen(self, request):
+        """Open *request* with the configured SSL verification behaviour."""
+        return urllib.request.urlopen(
+            request,
+            timeout=self.timeout,
+            context=self._ssl_context(),
+        )
 
     def _get_full_url(self, base_url, endpoint):
         """Join a base URL and an endpoint path."""
@@ -151,13 +174,13 @@ class BaseApiClient(metaclass=ABCMeta):
     def _request_json(self, url):
         """Fetch JSON from *url* and return the parsed object."""
         request = self._build_request(url)
-        with urllib.request.urlopen(request, timeout=self.timeout) as response:
+        with self._urlopen(request) as response:
             return json.loads(response.read().decode("utf-8"))
 
     def _download_file(self, url, dest_path):
         """Download *url* to *dest_path*."""
         request = self._build_request(url)
-        with urllib.request.urlopen(request, timeout=self.timeout) as response:
+        with self._urlopen(request) as response:
             with open(dest_path, "wb") as out:
                 shutil.copyfileobj(response, out)
 

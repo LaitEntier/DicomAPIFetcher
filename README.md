@@ -55,6 +55,14 @@ If you need to call a different API, the token can alternatively be sent as a
 `Bearer` header, a custom header, or a query parameter — configure this in the
 **Authentication** section.
 
+### Self-signed certificates
+
+The ArchiMed server uses a self-signed certificate on port 8443, so the module
+ships with **Ignore SSL certificate errors** enabled by default. This disables
+certificate verification for API calls — acceptable on a trusted private
+network, but do not enable it for untrusted hosts. Uncheck the box if you
+install a proper CA-signed certificate.
+
 The token is stored in Slicer's settings in plain text. On shared machines,
 consider whether this is acceptable for your security model.
 
