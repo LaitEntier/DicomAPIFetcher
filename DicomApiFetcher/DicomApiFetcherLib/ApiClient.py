@@ -155,7 +155,10 @@ class BaseApiClient(metaclass=ABCMeta):
         url = self._apply_token_to_url(url)
         request = urllib.request.Request(
             url,
-            headers={"Accept": "application/json"},
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
         )
 
         if not self.token or self.token_mode in ("none", "query"):
