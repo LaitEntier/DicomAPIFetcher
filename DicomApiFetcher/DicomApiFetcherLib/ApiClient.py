@@ -64,7 +64,7 @@ import shutil
 import urllib.request
 import zipfile
 from abc import ABCMeta, abstractmethod
-from urllib.parse import urljoin
+from urllib.parse import urlencode, urljoin
 
 
 class BaseApiClient(metaclass=ABCMeta):
@@ -78,6 +78,40 @@ class BaseApiClient(metaclass=ABCMeta):
         self.token = token or ""
         self.token_mode = (token_mode or "none").lower()
         self.token_name = token_name or ""
+
+    def login(self, base_url, username, password, login_endpoint="/api/login"):
+        """
+        Log in to the API and store the returned token.
+
+        The login request is sent as ``application/x-www-form-urlencoded``
+        with ``login`` and ``password`` fields. Returns the token string.
+        """
+        url = self._get_full_url(base_url, login_endpoint)
+        form_data = urlencode({"login": username, "password": password}).encode(
+            "utf-8"
+        )
+        request = urllib.request.Request(
+            url,
+            data=form_data,
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "application/json",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            body = response.read().decode("utf-8")
+
+        try:
+            payload = json.loads(body)
+        except ValueError:
+            payload = {"token": body}
+
+        token = payload.get("token") if isinstance(payload, dict) else payload
+        if not token:
+            raise RuntimeError("Login response did not contain a token.")
+
+        self.token = str(token)
+        return self.token
 
     def _get_full_url(self, base_url, endpoint):
         """Join a base URL and an endpoint path."""

@@ -12,6 +12,7 @@ them into the Slicer DICOM database, and loads the selected series into the scen
 * Adapts to your API by changing endpoint templates in the module UI.
 * Imports downloaded DICOMs into Slicer's DICOM database.
 * Auto-loads the imported patient(s) into the scene.
+* Built-in login against `POST /api/login` (form-encoded credentials) with automatic token capture.
 * Optional API token that can be sent as a Bearer header, a custom header, or a query parameter.
 
 ## Installation
@@ -27,14 +28,35 @@ them into the Slicer DICOM database, and loads the selected series into the scen
 
 ## Usage
 
-1. Enter or keep the API base URL.
-2. Select the strategy that matches your API and adjust the endpoint templates.
-3. Click **Fetch studies / series**.
-4. Select one item from the list.
-5. If the API requires a token, paste it in the **Authentication** section and choose how it should be sent (Bearer header, custom header, or query parameter).
-6. Click **Import & Load selected**.
+1. Enter the API base URL, e.g. `https://recharme-pr01:8443/ArchiMed3-web`.
+2. Enter your username/password and click **Login**.
+3. The returned token is stored automatically and sent as `Authorization: <token>`.
+4. Set the **List endpoint**, e.g. `/api/db/final/studies`.
+5. Click **Fetch studies / series**.
+6. Select one item from the list.
+7. Click **Import & Load selected**.
 
 The API base URL, chosen strategy, and token are saved in Slicer's settings.
+
+## Authentication
+
+The module includes a built-in login flow matching the ArchiMed API:
+
+* `POST <base_url>/api/login`
+* Content-Type: `application/x-www-form-urlencoded`
+* Body: `login=<username>&password=<password>`
+* Response: JSON containing a `token` field.
+
+After a successful login the token is stored in the **API token** field and sent
+on subsequent requests as `Authorization: <token>` (raw token, no `Bearer`
+prefix), exactly as expected by the ArchiMed API.
+
+If you need to call a different API, the token can alternatively be sent as a
+`Bearer` header, a custom header, or a query parameter — configure this in the
+**Authentication** section.
+
+The token is stored in Slicer's settings in plain text. On shared machines,
+consider whether this is acceptable for your security model.
 
 ## API contract
 
@@ -62,17 +84,6 @@ Returns either a JSON array or an object with an `items` key:
 `GET <base_url>/<fetch_endpoint>` where `{id}` is replaced by the selected item ID.
 
 The response body must be a ZIP archive containing DICOM files.
-
-## Authentication
-
-If the API requires authentication, paste the token in the module UI and choose one of the supported modes:
-
-* **No token** — no authentication header is sent.
-* **Authorization: Bearer header** — sends `Authorization: Bearer <token>`.
-* **Custom header** — sends `<name>: <token>` (default name is `X-API-Key`).
-* **Query parameter** — appends `<name>=<token>` to every request URL (default name is `token`).
-
-The token is stored in Slicer's settings in plain text. On shared machines, consider whether this is acceptable for your security model.
 
 ### Manifest fetch endpoint
 
@@ -111,9 +122,10 @@ DicomApiFetcher/
 ├── CMakeLists.txt
 ├── DicomApiFetcher/
 │   ├── CMakeLists.txt
-│   ├── DicomApiFetcher.py        # Module and UI
-│   ├── DicomApiFetcherLogic.py   # Download / import / load logic
-│   ├── ApiClient.py              # HTTP API adapters
+│   ├── DicomApiFetcher.py              # Module and UI
+│   ├── DicomApiFetcherLib/
+│   │   ├── ApiClient.py                # HTTP API adapters (incl. login)
+│   │   └── DicomApiFetcherLogic.py     # Download / import / load logic
 │   └── Resources/
 │       └── Icons/
 │           └── DicomApiFetcher.png

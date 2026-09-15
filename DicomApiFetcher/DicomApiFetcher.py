@@ -87,7 +87,9 @@ class DicomApiFetcherWidget(ScriptedLoadableModuleWidget):
         config_layout = qt.QFormLayout(config_group)
 
         self.baseUrlLineEdit = qt.QLineEdit()
-        self.baseUrlLineEdit.setPlaceholderText("https://my-pacs.example.com/api")
+        self.baseUrlLineEdit.setPlaceholderText(
+            "https://recharme-pr01:8443/ArchiMed3-web"
+        )
         config_layout.addRow("API base URL:", self.baseUrlLineEdit)
 
         self.clientTypeComboBox = qt.QComboBox()
@@ -96,7 +98,7 @@ class DicomApiFetcherWidget(ScriptedLoadableModuleWidget):
         config_layout.addRow("API strategy:", self.clientTypeComboBox)
 
         self.listEndpointLineEdit = qt.QLineEdit()
-        self.listEndpointLineEdit.setPlaceholderText("/studies")
+        self.listEndpointLineEdit.setPlaceholderText("/api/db/final/studies")
         config_layout.addRow("List endpoint:", self.listEndpointLineEdit)
 
         self.fetchEndpointLineEdit = qt.QLineEdit()
@@ -104,6 +106,24 @@ class DicomApiFetcherWidget(ScriptedLoadableModuleWidget):
         config_layout.addRow("Fetch endpoint:", self.fetchEndpointLineEdit)
 
         self.layout.addWidget(config_group)
+
+        # --- Login group ---
+        login_group = qt.QGroupBox("Login")
+        login_layout = qt.QFormLayout(login_group)
+
+        self.usernameLineEdit = qt.QLineEdit()
+        self.usernameLineEdit.setPlaceholderText("Username")
+        login_layout.addRow("Username:", self.usernameLineEdit)
+
+        self.passwordLineEdit = qt.QLineEdit()
+        self.passwordLineEdit.setPlaceholderText("Password")
+        self.passwordLineEdit.setEchoMode(qt.QLineEdit.Password)
+        login_layout.addRow("Password:", self.passwordLineEdit)
+
+        self.loginButton = qt.QPushButton("Login")
+        login_layout.addRow(self.loginButton)
+
+        self.layout.addWidget(login_group)
 
         # --- Token group ---
         token_group = qt.QGroupBox("Authentication (optional)")
@@ -123,7 +143,7 @@ class DicomApiFetcherWidget(ScriptedLoadableModuleWidget):
 
         self.tokenNameLineEdit = qt.QLineEdit()
         self.tokenNameLineEdit.setPlaceholderText(
-            "X-API-Key (custom header) or token (query parameter)"
+            "Authorization (raw token) / X-API-Key / token"
         )
         token_layout.addRow("Header/query name:", self.tokenNameLineEdit)
 
@@ -158,6 +178,7 @@ class DicomApiFetcherWidget(ScriptedLoadableModuleWidget):
         self.layout.addStretch(1)
 
         # --- Connections ---
+        self.loginButton.connect("clicked(bool)", self.onLoginButton)
         self.fetchButton.connect("clicked(bool)", self.onFetchButton)
         self.importButton.connect("clicked(bool)", self.onImportButton)
         self.itemsListWidget.connect(
@@ -252,6 +273,7 @@ class DicomApiFetcherWidget(ScriptedLoadableModuleWidget):
 
     def _setBusy(self, busy):
         """Enable/disable interactive controls during operations."""
+        self.loginButton.setEnabled(not busy)
         self.fetchButton.setEnabled(not busy)
         self.importButton.setEnabled(
             not busy and self.itemsListWidget.currentItem() is not None
@@ -273,6 +295,38 @@ class DicomApiFetcherWidget(ScriptedLoadableModuleWidget):
     def onItemSelectionChanged(self, current, previous):
         """Enable the Import button only when an item is selected."""
         self.importButton.setEnabled(current is not None)
+
+    def onLoginButton(self):
+        """Log in to the API and store the returned token."""
+        base_url = self._ensureBaseUrl()
+        if not base_url:
+            return
+
+        username = self.usernameLineEdit.text.strip()
+        password = self.passwordLineEdit.text
+        if not username or not password:
+            slicer.util.warningDisplay("Please enter a username and password.")
+            return
+
+        self._setBusy(True)
+        self.statusLabel.text = "Logging in..."
+
+        try:
+            client = self._currentClient()
+            token = client.login(base_url, username, password)
+
+            # ArchiMed expects the raw token in the Authorization header.
+            self.tokenLineEdit.text = token
+            self.tokenModeComboBox.currentIndex = self._tokenModeIndex("header")
+            self.tokenNameLineEdit.text = "Authorization"
+            self._saveSettings()
+
+            self.statusLabel.text = "Login successful."
+        except Exception as e:
+            self.statusLabel.text = f"Login failed: {e}"
+            slicer.util.errorDisplay(f"Login failed:\n{e}")
+        finally:
+            self._setBusy(False)
 
     def onFetchButton(self):
         """List available items from the API."""
