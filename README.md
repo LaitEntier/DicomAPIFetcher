@@ -6,12 +6,15 @@ them into the Slicer DICOM database, and loads the selected series into the scen
 ## Features
 
 * Prompts for the API base URL on first use and remembers it across Slicer sessions.
-* Two interchangeable API strategies:
+* Three interchangeable API strategies:
   * **ZIP archive** - the API returns a JSON list; each item is downloaded as a ZIP of DICOM files.
   * **JSON manifest** - the API returns a JSON list; a detail endpoint returns a list of file URLs to download individually.
+  * **ArchiMed3-web** - browses the ArchiMed hierarchy `study → exam → serie → file` and downloads each file as an individual stream.
+* Hierarchical tree browser (for ArchiMed): fetch the studies, then lazily expand a study to see its exams and an exam to see its series.
+* Select any mix of studies, exams, or series (extended selection) and import exactly that data.
 * Adapts to your API by changing endpoint templates in the module UI.
 * Imports downloaded DICOMs into Slicer's DICOM database.
-* Auto-loads the imported patient(s) into the scene.
+* Auto-loads the newly imported patient(s) into the scene.
 * Built-in login against `POST /api/login` (form-encoded credentials) with automatic token capture.
 * Optional API token that can be sent as a Bearer header, a custom header, or a query parameter.
 
@@ -29,14 +32,21 @@ them into the Slicer DICOM database, and loads the selected series into the scen
 ## Usage
 
 1. Enter the API base URL, e.g. `https://recharme-pr01:8443/ArchiMed3-web`.
-2. Enter your username/password and click **Login**.
-3. The returned token is stored automatically and sent as `Authorization: <token>`.
-4. Set the **List endpoint**, e.g. `/api/db/final/studies`.
-5. Click **Fetch studies / series**.
-6. Select one item from the list.
-7. Click **Import & Load selected**.
+2. Select the **ArchiMed3-web** strategy and the **Zone** (`final` or `trash`).
+3. Enter your username/password and click **Login**.
+4. The returned token is stored automatically and sent as `Authorization: <token>`.
+5. Click **Fetch studies / series** — the tree is populated with studies.
+6. Expand a study to load its exams, then expand an exam to load its series
+   (children are fetched on demand).
+7. Select one or more studies / exams / series.
+8. Click **Import & Load selected** — exactly the selected data is downloaded,
+   imported, and loaded.
 
-The API base URL, chosen strategy, and token are saved in Slicer's settings.
+For the **ZIP archive** and **JSON manifest** strategies, set the **List
+endpoint** (e.g. `/api/db/final/studies`) and **Fetch endpoint** instead of a
+zone; the tree then shows a flat list of items.
+
+The API base URL, chosen strategy, zone, and token are saved in Slicer's settings.
 
 ## Authentication
 
@@ -69,6 +79,21 @@ consider whether this is acceptable for your security model.
 ## API contract
 
 The default clients expect the following JSON schemas.
+
+### ArchiMed3-web hierarchy endpoints
+
+The ArchiMed strategy walks the `study → exam → serie → file` hierarchy
+(`zone` is `final` or `trash`):
+
+```
+GET /api/db/{zone}/studies                                                   -> [study]   (studyID, studyDescription, nbExams, ...)
+GET /api/db/{zone}/studies/{studyID}/exams                                   -> [exam]    (examID, examCode, examDescription, examDate, ...)
+GET /api/db/{zone}/studies/{studyID}/exams/{examID}/series                   -> [serie]   (serieID, serieNumber, serieDescription, nbFiles, ...)
+GET /api/db/{zone}/studies/{studyID}/exams/{examID}/series/{serieID}/files   -> [file]    (fileID, fileName, fileSize, ...)
+GET /api/db/{zone}/files/{fileID}/stream                                     -> raw DICOM bytes
+```
+
+All requests send the token as `Authorization: <token>` (raw token).
 
 ### List endpoint
 
@@ -118,7 +143,7 @@ or simply:
 
 ## Adapting to another API format
 
-If your API returns a different shape, edit `DicomApiFetcher/ApiClient.py` and
+If your API returns a different shape, edit `DicomApiFetcher/DicomApiFetcherLib/ApiClient.py` and
 add a new `BaseApiClient` subclass, then register it in
 `DicomApiFetcher/DicomApiFetcher.py` by adding a corresponding entry to the
 *API strategy* combo box.

@@ -335,27 +335,161 @@ class ArchiMedApiClient(BaseApiClient):
     API client for ArchiMed3-web archives.
 
     ArchiMed organises DICOM data as ``study -> exam -> serie -> file`` and
-    exposes each file as an individual stream, so fetching an item walks the
-    hierarchy and downloads every file one by one::
+    exposes each file as an individual stream::
 
-        GET <study_url>/exams                                  -> [{"examID": ...}]
-        GET <study_url>/exams/<examID>/series                  -> [{"serieID": ...}]
-        GET <study_url>/exams/<examID>/series/<serieID>/files  -> [{"fileID", "fileName"}]
-        GET <api_prefix>/files/<fileID>/stream                 -> raw DICOM bytes
+        GET /api/db/<zone>/studies                                          -> [study]
+        GET /api/db/<zone>/studies/<studyID>/exams                          -> [exam]
+        GET /api/db/<zone>/studies/<studyID>/exams/<examID>/series          -> [serie]
+        GET .../exams/<examID>/series/<serieID>/files                       -> [file]
+        GET /api/db/<zone>/files/<fileID>/stream                            -> raw bytes
 
-    The fetch endpoint template must address the study to download, e.g.
-    ``/api/db/final/studies/{id}``. Everything before ``/studies`` is reused
-    as the API prefix when building file stream URLs.
+    ``zone`` is ``"final"`` (default) or ``"trash"``.
 
-    Selecting an item whose ID is a plain study ID downloads all its exams.
-    When the list endpoint addresses the exams of one study
-    (``.../studies/<studyID>/exams``), item IDs are stored as the composite
-    ``<studyID>/<examID>`` so that a single exam can be downloaded.
+    The ``list_studies`` / ``list_exams`` / ``list_series`` / ``list_files``
+    methods expose each level of the hierarchy, and ``download_study`` /
+    ``download_exam`` / ``download_serie`` download the corresponding subtree.
+
+    The legacy ``list_items`` / ``fetch_item`` interface is kept: selecting an
+    item whose ID is a plain study ID downloads all its exams; the composite
+    ID ``<studyID>/<examID>`` downloads a single exam.
     """
 
     DEFAULT_LIST_ENDPOINT = "/api/db/final/studies"
     DEFAULT_FETCH_ENDPOINT = "/api/db/final/studies/{id}"
 
+    def __init__(self, *args, zone="final", **kwargs):
+        super().__init__(*args, **kwargs)
+        self.zone = zone or "final"
+
+    # ------------------------------------------------------------------
+    # Hierarchy browsing
+    # ------------------------------------------------------------------
+    def _studies_url(self, base_url):
+        """URL of the studies collection for the configured zone."""
+        return self._get_full_url(base_url, f"/api/db/{self.zone}/studies")
+
+    def list_studies(self, base_url):
+        """Return the raw study dicts of the configured zone."""
+        data = self._request_json(self._studies_url(base_url))
+        return self._normalize_list(data)
+
+    def list_exams(self, base_url, study_id):
+        """Return the raw exam dicts of study *study_id*."""
+        url = f"{self._studies_url(base_url)}/{study_id}/exams"
+        return self._normalize_list(self._request_json(url))
+
+    def list_series(self, base_url, study_id, exam_id):
+        """Return the raw serie dicts of exam *exam_id* in study *study_id*."""
+        url = (
+            f"{self._studies_url(base_url)}/{study_id}"
+            f"/exams/{exam_id}/series"
+        )
+        return self._normalize_list(self._request_json(url))
+
+    def list_files(self, base_url, study_id, exam_id, serie_id):
+        """Return the raw file dicts of serie *serie_id*."""
+        url = (
+            f"{self._studies_url(base_url)}/{study_id}"
+            f"/exams/{exam_id}/series/{serie_id}/files"
+        )
+        return self._normalize_list(self._request_json(url))
+
+    # ------------------------------------------------------------------
+    # Downloads
+    # ------------------------------------------------------------------
+    def _file_stream_url(self, base_url, file_id):
+        """URL of the raw stream of file *file_id*."""
+        return self._get_full_url(
+            base_url, f"/api/db/{self.zone}/files/{file_id}/stream"
+        )
+
+    def download_serie(
+        self,
+        base_url,
+        study_id,
+        exam_id,
+        serie_id,
+        output_dir,
+        progress_callback=None,
+    ):
+        """
+        Download every file of serie *serie_id* into ``<output_dir>/dicoms``
+        and return that folder.
+        """
+        files = self.list_files(base_url, study_id, exam_id, serie_id)
+        if not files:
+            raise RuntimeError(
+                f"Serie {serie_id} (exam {exam_id}) contains no files."
+            )
+
+        dicom_dir = os.path.join(output_dir, "dicoms")
+        os.makedirs(dicom_dir, exist_ok=True)
+
+        for index, entry in enumerate(files):
+            if isinstance(entry, dict):
+                file_id = entry.get("fileID")
+                file_name = entry.get("fileName") or ""
+            else:
+                file_id = entry
+                file_name = ""
+            dest_name = (
+                f"{file_id}_{file_name}" if file_name else f"file_{file_id}.dcm"
+            )
+            if progress_callback:
+                progress_callback(
+                    f"Downloading file {index + 1}/{len(files)}"
+                    f" of serie {serie_id}..."
+                )
+            self._download_file(
+                self._file_stream_url(base_url, file_id),
+                os.path.join(dicom_dir, dest_name),
+            )
+        return dicom_dir
+
+    def download_exam(
+        self, base_url, study_id, exam_id, output_dir, progress_callback=None
+    ):
+        """Download every serie of exam *exam_id* into ``<output_dir>/dicoms``."""
+        series = self.list_series(base_url, study_id, exam_id)
+        if not series:
+            raise RuntimeError(
+                f"Exam {exam_id} (study {study_id}) contains no series."
+            )
+        for serie in series:
+            serie_id = (
+                serie.get("serieID") if isinstance(serie, dict) else serie
+            )
+            self.download_serie(
+                base_url,
+                study_id,
+                exam_id,
+                serie_id,
+                output_dir,
+                progress_callback=progress_callback,
+            )
+        return os.path.join(output_dir, "dicoms")
+
+    def download_study(
+        self, base_url, study_id, output_dir, progress_callback=None
+    ):
+        """Download every exam of study *study_id* into ``<output_dir>/dicoms``."""
+        exams = self.list_exams(base_url, study_id)
+        if not exams:
+            raise RuntimeError(f"Study {study_id} contains no exams.")
+        for exam in exams:
+            exam_id = exam.get("examID") if isinstance(exam, dict) else exam
+            self.download_exam(
+                base_url,
+                study_id,
+                exam_id,
+                output_dir,
+                progress_callback=progress_callback,
+            )
+        return os.path.join(output_dir, "dicoms")
+
+    # ------------------------------------------------------------------
+    # Legacy flat interface
+    # ------------------------------------------------------------------
     def list_items(self, base_url, list_endpoint=None):
         endpoint = list_endpoint or self.DEFAULT_LIST_ENDPOINT
         url = self._get_full_url(base_url, endpoint)
@@ -373,7 +507,11 @@ class ArchiMedApiClient(BaseApiClient):
 
     def fetch_item(self, base_url, item_id, output_dir, fetch_endpoint=None):
         template = fetch_endpoint or self.DEFAULT_FETCH_ENDPOINT
-        api_prefix = template.split("/studies")[0]
+
+        # Honour a custom zone if the template addresses one.
+        match = re.match(r"/api/db/([^/]+)/studies", template)
+        if match:
+            self.zone = match.group(1)
 
         item_id = str(item_id)
         if "/" in item_id:
@@ -381,47 +519,6 @@ class ArchiMedApiClient(BaseApiClient):
         else:
             study_id, only_exam_id = item_id, None
 
-        study_url = self._get_full_url(
-            base_url, template.replace("{id}", study_id)
-        )
-
         if only_exam_id is not None:
-            exams = [{"examID": only_exam_id}]
-        else:
-            exams = self._normalize_list(self._request_json(f"{study_url}/exams"))
-        if not exams:
-            raise RuntimeError(f"Study {study_id} contains no exams.")
-
-        dicom_dir = os.path.join(output_dir, "dicoms")
-        os.makedirs(dicom_dir, exist_ok=True)
-
-        for exam in exams:
-            exam_id = exam.get("examID") if isinstance(exam, dict) else exam
-            series_url = f"{study_url}/exams/{exam_id}/series"
-            series = self._normalize_list(self._request_json(series_url))
-            for serie in series:
-                serie_id = (
-                    serie.get("serieID") if isinstance(serie, dict) else serie
-                )
-                files_url = f"{series_url}/{serie_id}/files"
-                files = self._normalize_list(self._request_json(files_url))
-                for entry in files:
-                    if isinstance(entry, dict):
-                        file_id = entry.get("fileID")
-                        file_name = entry.get("fileName") or ""
-                    else:
-                        file_id = entry
-                        file_name = ""
-                    dest_name = (
-                        f"{file_id}_{file_name}"
-                        if file_name
-                        else f"file_{file_id}.dcm"
-                    )
-                    stream_url = self._get_full_url(
-                        base_url, f"{api_prefix}/files/{file_id}/stream"
-                    )
-                    self._download_file(
-                        stream_url, os.path.join(dicom_dir, dest_name)
-                    )
-
-        return dicom_dir
+            return self.download_exam(base_url, study_id, only_exam_id, output_dir)
+        return self.download_study(base_url, study_id, output_dir)

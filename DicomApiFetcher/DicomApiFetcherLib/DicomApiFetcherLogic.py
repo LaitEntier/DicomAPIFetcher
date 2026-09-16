@@ -34,25 +34,67 @@ class DicomApiFetcherLogic(ScriptedLoadableModuleLogic):
         self,
         client,
         base_url,
-        item_id,
+        item_ids=None,
         fetch_endpoint=None,
+        archimed_nodes=None,
         progress_callback=None,
     ):
         """
-        Download the DICOM files for *item_id* using *client*, import them into
-        the Slicer DICOM database, and load the patient(s) into the scene.
+        Download DICOM data using *client*, import it into the Slicer DICOM
+        database, and load the newly imported patient(s) into the scene.
 
-        Returns the list of loaded node IDs.
+        Two download modes:
+
+        * ``archimed_nodes`` - a list of node descriptors
+          ``{"level": "study"|"exam"|"serie", "studyID", "examID",
+          "serieID"}`` downloaded through the ArchiMed hierarchy methods.
+        * ``item_ids`` - a list of flat item IDs downloaded through the
+          generic ``fetch_item`` interface (ZIP/manifest strategies).
+
+        Returns the list of loaded node IDs (empty when the import produced
+        no new patient, e.g. the data was already in the database).
         """
         temp_root = tempfile.mkdtemp(prefix="dicom_api_fetcher_")
         try:
             if progress_callback:
                 progress_callback("Downloading DICOM data...")
-            dicom_dir = client.fetch_item(
-                base_url, item_id, temp_root, fetch_endpoint
-            )
 
-            if not os.path.isdir(dicom_dir):
+            if archimed_nodes:
+                dicom_dir = os.path.join(temp_root, "dicoms")
+                for node in archimed_nodes:
+                    level = node.get("level")
+                    if level == "study":
+                        client.download_study(
+                            base_url,
+                            node["studyID"],
+                            temp_root,
+                            progress_callback=progress_callback,
+                        )
+                    elif level == "exam":
+                        client.download_exam(
+                            base_url,
+                            node["studyID"],
+                            node["examID"],
+                            temp_root,
+                            progress_callback=progress_callback,
+                        )
+                    else:  # serie
+                        client.download_serie(
+                            base_url,
+                            node["studyID"],
+                            node["examID"],
+                            node["serieID"],
+                            temp_root,
+                            progress_callback=progress_callback,
+                        )
+            else:
+                dicom_dir = None
+                for item_id in item_ids or []:
+                    dicom_dir = client.fetch_item(
+                        base_url, item_id, temp_root, fetch_endpoint
+                    )
+
+            if not dicom_dir or not os.path.isdir(dicom_dir):
                 raise RuntimeError(
                     f"Download did not produce a DICOM folder: {dicom_dir}"
                 )
@@ -60,23 +102,32 @@ class DicomApiFetcherLogic(ScriptedLoadableModuleLogic):
             if progress_callback:
                 progress_callback("Importing into DICOM database...")
             self._ensureDicomDatabase()
+            patients_before = set(slicer.dicomDatabase.patients())
             DICOMUtils.importDicom(dicom_dir, slicer.dicomDatabase)
+            new_patient_uids = [
+                uid
+                for uid in slicer.dicomDatabase.patients()
+                if uid not in patients_before
+            ]
+
+            if not new_patient_uids:
+                if progress_callback:
+                    progress_callback(
+                        "No new patient after import "
+                        "(data may already be in the database)."
+                    )
+                return []
 
             if progress_callback:
                 progress_callback("Loading into scene...")
-            patient_uids = slicer.dicomDatabase.patients()
-            if not patient_uids:
-                raise RuntimeError("No DICOM patients found after import.")
-
             loaded_node_ids = []
-            for uid in patient_uids:
+            for uid in new_patient_uids:
                 loaded_node_ids.extend(DICOMUtils.loadPatientByUID(uid))
 
             return loaded_node_ids
-        except Exception:
-            # Clean up the temporary download folder on any error.
+        finally:
+            # Imported files have been copied into the DICOM database.
             shutil.rmtree(temp_root, ignore_errors=True)
-            raise
 
     def _ensureDicomDatabase(self):
         """Make sure Slicer's DICOM database is available."""
