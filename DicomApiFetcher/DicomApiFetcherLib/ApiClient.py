@@ -160,13 +160,13 @@ class BaseApiClient(metaclass=ABCMeta):
         separator = "&" if "?" in url else "?"
         return f"{url}{separator}{name}={self.token}"
 
-    def _build_request(self, url):
+    def _build_request(self, url, accept="application/json"):
         """Create a Request for *url* with the configured token."""
         url = self._apply_token_to_url(url)
         request = urllib.request.Request(
             url,
             headers={
-                "Accept": "application/json",
+                "Accept": accept,
                 "Content-Type": "application/json",
             },
         )
@@ -192,7 +192,7 @@ class BaseApiClient(metaclass=ABCMeta):
 
     def _download_file(self, url, dest_path):
         """Download *url* to *dest_path*."""
-        request = self._build_request(url)
+        request = self._build_request(url, accept="*/*")
         with self._urlopen(request) as response:
             with open(dest_path, "wb") as out:
                 shutil.copyfileobj(response, out)
