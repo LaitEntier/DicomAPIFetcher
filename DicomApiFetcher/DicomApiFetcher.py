@@ -33,7 +33,11 @@ module_dir = os.path.dirname(os.path.abspath(__file__))
 if module_dir not in sys.path:
     sys.path.insert(0, module_dir)
 
-from DicomApiFetcherLib.ApiClient import ManifestApiClient, ZipApiClient
+from DicomApiFetcherLib.ApiClient import (
+    ArchiMedApiClient,
+    ManifestApiClient,
+    ZipApiClient,
+)
 from DicomApiFetcherLib.DicomApiFetcherLogic import DicomApiFetcherLogic
 
 
@@ -102,6 +106,7 @@ class DicomApiFetcherWidget(ScriptedLoadableModuleWidget):
         self.clientTypeComboBox = qt.QComboBox()
         self.clientTypeComboBox.addItem("ZIP archive", "zip")
         self.clientTypeComboBox.addItem("JSON manifest", "manifest")
+        self.clientTypeComboBox.addItem("ArchiMed3-web", "archimed")
         config_layout.addRow("API strategy:", self.clientTypeComboBox)
 
         self.listEndpointLineEdit = qt.QLineEdit()
@@ -109,7 +114,9 @@ class DicomApiFetcherWidget(ScriptedLoadableModuleWidget):
         config_layout.addRow("List endpoint:", self.listEndpointLineEdit)
 
         self.fetchEndpointLineEdit = qt.QLineEdit()
-        self.fetchEndpointLineEdit.setPlaceholderText("/studies/{id}/download")
+        self.fetchEndpointLineEdit.setPlaceholderText(
+            "/studies/{id}/download or /api/db/final/studies/{id}"
+        )
         config_layout.addRow("Fetch endpoint:", self.fetchEndpointLineEdit)
 
         self.layout.addWidget(config_group)
@@ -200,8 +207,10 @@ class DicomApiFetcherWidget(ScriptedLoadableModuleWidget):
         settings = qt.QSettings()
         self.baseUrlLineEdit.text = settings.value(self.SETTINGS_BASE_URL, "")
         client_type = settings.value(self.SETTINGS_CLIENT_TYPE, "zip")
-        index = 0 if client_type == "zip" else 1
-        self.clientTypeComboBox.currentIndex = index
+        for index in range(self.clientTypeComboBox.count):
+            if self.clientTypeComboBox.itemData(index) == client_type:
+                self.clientTypeComboBox.currentIndex = index
+                break
         self.listEndpointLineEdit.text = settings.value(
             self.SETTINGS_LIST_ENDPOINT, ""
         )
@@ -250,7 +259,9 @@ class DicomApiFetcherWidget(ScriptedLoadableModuleWidget):
     def _currentClient(self):
         """Return an ApiClient instance matching the selected strategy and token."""
         client_type = self.clientTypeComboBox.currentData
-        if client_type == "manifest":
+        if client_type == "archimed":
+            client = ArchiMedApiClient()
+        elif client_type == "manifest":
             client = ManifestApiClient()
         else:
             client = ZipApiClient()

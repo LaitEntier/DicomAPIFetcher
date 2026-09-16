@@ -17,6 +17,9 @@ Two concrete clients are provided:
   a ZIP archive of DICOM files.
 * ``ManifestApiClient`` - the API returns a JSON list and a detail endpoint that
   contains a JSON manifest with a list of file URLs to download individually.
+* ``ArchiMedApiClient`` - client for ArchiMed3-web archives, where DICOM data
+  is organised as study -> exam -> serie -> file and each file is downloaded
+  as an individual stream.
 
 Authentication
 --------------
@@ -66,6 +69,7 @@ Manifest fetch endpoint::
 
 import json
 import os
+import re
 import shutil
 import ssl
 import urllib.request
@@ -322,5 +326,102 @@ class ManifestApiClient(BaseApiClient):
 
             dest_path = os.path.join(dicom_dir, file_name)
             self._download_file(file_url, dest_path)
+
+        return dicom_dir
+
+
+class ArchiMedApiClient(BaseApiClient):
+    """
+    API client for ArchiMed3-web archives.
+
+    ArchiMed organises DICOM data as ``study -> exam -> serie -> file`` and
+    exposes each file as an individual stream, so fetching an item walks the
+    hierarchy and downloads every file one by one::
+
+        GET <study_url>/exams                                  -> [{"examID": ...}]
+        GET <study_url>/exams/<examID>/series                  -> [{"serieID": ...}]
+        GET <study_url>/exams/<examID>/series/<serieID>/files  -> [{"fileID", "fileName"}]
+        GET <api_prefix>/files/<fileID>/stream                 -> raw DICOM bytes
+
+    The fetch endpoint template must address the study to download, e.g.
+    ``/api/db/final/studies/{id}``. Everything before ``/studies`` is reused
+    as the API prefix when building file stream URLs.
+
+    Selecting an item whose ID is a plain study ID downloads all its exams.
+    When the list endpoint addresses the exams of one study
+    (``.../studies/<studyID>/exams``), item IDs are stored as the composite
+    ``<studyID>/<examID>`` so that a single exam can be downloaded.
+    """
+
+    DEFAULT_LIST_ENDPOINT = "/api/db/final/studies"
+    DEFAULT_FETCH_ENDPOINT = "/api/db/final/studies/{id}"
+
+    def list_items(self, base_url, list_endpoint=None):
+        endpoint = list_endpoint or self.DEFAULT_LIST_ENDPOINT
+        url = self._get_full_url(base_url, endpoint)
+        data = self._request_json(url)
+        items = [self._item_to_dict(item) for item in self._normalize_list(data)]
+
+        # Listing the exams of one study: keep the study ID in the item ID
+        # so fetch_item can rebuild the full path for a single exam.
+        match = re.search(r"/studies/([^/]+)/exams/?$", endpoint)
+        if match:
+            study_id = match.group(1)
+            for item in items:
+                item["id"] = f"{study_id}/{item['id']}"
+        return items
+
+    def fetch_item(self, base_url, item_id, output_dir, fetch_endpoint=None):
+        template = fetch_endpoint or self.DEFAULT_FETCH_ENDPOINT
+        api_prefix = template.split("/studies")[0]
+
+        item_id = str(item_id)
+        if "/" in item_id:
+            study_id, only_exam_id = item_id.split("/", 1)
+        else:
+            study_id, only_exam_id = item_id, None
+
+        study_url = self._get_full_url(
+            base_url, template.replace("{id}", study_id)
+        )
+
+        if only_exam_id is not None:
+            exams = [{"examID": only_exam_id}]
+        else:
+            exams = self._normalize_list(self._request_json(f"{study_url}/exams"))
+        if not exams:
+            raise RuntimeError(f"Study {study_id} contains no exams.")
+
+        dicom_dir = os.path.join(output_dir, "dicoms")
+        os.makedirs(dicom_dir, exist_ok=True)
+
+        for exam in exams:
+            exam_id = exam.get("examID") if isinstance(exam, dict) else exam
+            series_url = f"{study_url}/exams/{exam_id}/series"
+            series = self._normalize_list(self._request_json(series_url))
+            for serie in series:
+                serie_id = (
+                    serie.get("serieID") if isinstance(serie, dict) else serie
+                )
+                files_url = f"{series_url}/{serie_id}/files"
+                files = self._normalize_list(self._request_json(files_url))
+                for entry in files:
+                    if isinstance(entry, dict):
+                        file_id = entry.get("fileID")
+                        file_name = entry.get("fileName") or ""
+                    else:
+                        file_id = entry
+                        file_name = ""
+                    dest_name = (
+                        f"{file_id}_{file_name}"
+                        if file_name
+                        else f"file_{file_id}.dcm"
+                    )
+                    stream_url = self._get_full_url(
+                        base_url, f"{api_prefix}/files/{file_id}/stream"
+                    )
+                    self._download_file(
+                        stream_url, os.path.join(dicom_dir, dest_name)
+                    )
 
         return dicom_dir
