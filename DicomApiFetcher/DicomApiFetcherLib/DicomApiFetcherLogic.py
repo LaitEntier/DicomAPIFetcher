@@ -20,6 +20,27 @@ from DICOMLib import DICOMUtils
 from slicer.ScriptedLoadableModule import ScriptedLoadableModuleLogic
 
 
+def _seriesInstanceUIDs(dicom_dir):
+    """
+    Return the unique SeriesInstanceUIDs found in the files under
+    *dicom_dir*. Non-DICOM files are silently skipped.
+    """
+    import pydicom
+
+    uids = []
+    for root, _dirs, files in os.walk(dicom_dir):
+        for name in files:
+            path = os.path.join(root, name)
+            try:
+                dataset = pydicom.dcmread(path, stop_before_pixels=True)
+            except Exception:
+                continue
+            uid = getattr(dataset, "SeriesInstanceUID", None)
+            if uid and str(uid) not in uids:
+                uids.append(str(uid))
+    return uids
+
+
 class DicomApiFetcherLogic(ScriptedLoadableModuleLogic):
     """Logic for fetching DICOMs from an API and loading them in Slicer."""
 
@@ -41,7 +62,7 @@ class DicomApiFetcherLogic(ScriptedLoadableModuleLogic):
     ):
         """
         Download DICOM data using *client*, import it into the Slicer DICOM
-        database, and load the newly imported patient(s) into the scene.
+        database, and load the downloaded series into the scene.
 
         Two download modes:
 
@@ -51,8 +72,12 @@ class DicomApiFetcherLogic(ScriptedLoadableModuleLogic):
         * ``item_ids`` - a list of flat item IDs downloaded through the
           generic ``fetch_item`` interface (ZIP/manifest strategies).
 
-        Returns the list of loaded node IDs (empty when the import produced
-        no new patient, e.g. the data was already in the database).
+        Loading targets exactly the downloaded series (by SeriesInstanceUID),
+        so re-importing data that is already in the database still displays
+        it. For non-DICOM downloads it falls back to loading only newly
+        imported patients.
+
+        Returns the list of loaded node IDs.
         """
         temp_root = tempfile.mkdtemp(prefix="dicom_api_fetcher_")
         try:
@@ -101,15 +126,26 @@ class DicomApiFetcherLogic(ScriptedLoadableModuleLogic):
 
             if progress_callback:
                 progress_callback("Importing into DICOM database...")
+            # Remember which series we downloaded so we can load exactly
+            # those, even if their patient was already in the database.
+            series_uids = _seriesInstanceUIDs(dicom_dir)
             self._ensureDicomDatabase()
             patients_before = set(slicer.dicomDatabase.patients())
             DICOMUtils.importDicom(dicom_dir, slicer.dicomDatabase)
+
+            if progress_callback:
+                progress_callback("Loading into scene...")
+            if series_uids:
+                loaded_node_ids = DICOMUtils.loadSeriesByUID(series_uids)
+                return loaded_node_ids or []
+
+            # Fallback for non-DICOM downloads: load only newly imported
+            # patients (never the whole database).
             new_patient_uids = [
                 uid
                 for uid in slicer.dicomDatabase.patients()
                 if uid not in patients_before
             ]
-
             if not new_patient_uids:
                 if progress_callback:
                     progress_callback(
@@ -118,8 +154,6 @@ class DicomApiFetcherLogic(ScriptedLoadableModuleLogic):
                     )
                 return []
 
-            if progress_callback:
-                progress_callback("Loading into scene...")
             loaded_node_ids = []
             for uid in new_patient_uids:
                 loaded_node_ids.extend(DICOMUtils.loadPatientByUID(uid))
