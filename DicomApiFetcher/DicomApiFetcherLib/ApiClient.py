@@ -31,7 +31,8 @@ Authentication
 Default JSON schemas
 --------------------
 
-List endpoint (both clients) - a JSON array or an object with an ``items`` key::
+List endpoint (both clients) - a JSON array or an object with an ``items``
+(also ``studies`` / ``series`` / ``results``) key::
 
     [
       {"id": "study_1", "description": "CT Chest"},
@@ -41,6 +42,11 @@ List endpoint (both clients) - a JSON array or an object with an ``items`` key::
     # or
 
     {"items": [...]}
+
+Entries are normalized with ``_item_to_dict``: besides ``id`` /
+``description``, any key ending in ``ID`` (e.g. ``studyID``, ``examID``)
+or ``Description`` (e.g. ``studyDescription``, ``examDescription``) is
+recognized.
 
 Zip fetch endpoint - must return a ZIP archive of DICOM files.
 
@@ -210,11 +216,35 @@ class BaseApiClient(metaclass=ABCMeta):
             data = [data]
         return data
 
+    def _find_field(self, item, exact_keys, suffix):
+        """
+        Find a field value in *item* by trying *exact_keys* first, then any
+        key ending with *suffix* (case-insensitive). Returns ``None`` when
+        nothing matches.
+        """
+        for key in exact_keys:
+            if key in item and item[key] is not None:
+                return item[key]
+        for key, value in item.items():
+            if key.lower().endswith(suffix) and value is not None:
+                return value
+        return None
+
     def _item_to_dict(self, item):
         """Normalize a list entry to ``{"id", "description"}``."""
         if isinstance(item, dict):
-            item_id = str(item.get("id", ""))
-            description = item.get("description", item_id)
+            item_id = self._find_field(
+                item, ("id", "studyID", "seriesID", "examID"), "id"
+            )
+            description = self._find_field(
+                item,
+                ("description", "studyDescription", "seriesDescription",
+                 "examDescription"),
+                "description",
+            )
+            item_id = "" if item_id is None else str(item_id)
+            if description is None:
+                description = item_id
         else:
             item_id = str(item)
             description = str(item)
