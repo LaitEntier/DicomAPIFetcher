@@ -15,8 +15,8 @@ Usage
 5. Click **Fetch** to list the available studies.
 6. Expand a study to browse its exams, and an exam to browse its series.
 7. Select one or more studies / exams / series and click **Import & Load**
-   to import them into the Slicer DICOM database and load them into the
-   scene.
+   to load them directly into the scene (nothing is stored in the Slicer
+   DICOM database).
 """
 
 import os
@@ -666,8 +666,7 @@ class DicomApiFetcherWidget(ScriptedLoadableModuleWidget):
                 )
             else:
                 self.statusLabel.text = (
-                    "Import done. No new patient to load "
-                    "(data may already be in the DICOM database)."
+                    "Loading finished but produced no displayable data."
                 )
         except Exception as e:
             self.statusLabel.text = f"Error: {e}"

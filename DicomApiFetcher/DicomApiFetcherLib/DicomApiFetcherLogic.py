@@ -4,11 +4,17 @@ DicomApiFetcherLogic
 
 Logic class for the DICOM API Fetcher module.
 
-It connects the generic ``ApiClient`` layer with Slicer's DICOM infrastructure:
+It connects the generic ``ApiClient`` layer with Slicer's DICOM loading
+infrastructure:
 
-* download data for a selected item,
-* import the DICOM files into Slicer's DICOM database,
-* load the imported patient(s) into the scene.
+* download data for the selected item(s),
+* examine the downloaded files with Slicer's DICOM plugins (series assembly,
+  scalar volumes, segmentations, ...),
+* load the series directly into the scene.
+
+The Slicer DICOM database is intentionally NOT used: this module is a viewer
+for remote data, so files are loaded straight from the temporary download
+folder, which is deleted once loading is done.
 """
 
 import os
@@ -20,14 +26,16 @@ from DICOMLib import DICOMUtils
 from slicer.ScriptedLoadableModule import ScriptedLoadableModuleLogic
 
 
-def _seriesInstanceUIDs(dicom_dir):
+def _groupFilesBySeries(dicom_dir):
     """
-    Return the unique SeriesInstanceUIDs found in the files under
-    *dicom_dir*. Non-DICOM files are silently skipped.
+    Group the DICOM files under *dicom_dir* by SeriesInstanceUID.
+
+    Returns a dict ``{series_uid: [file paths]}``. Non-DICOM files are
+    silently skipped.
     """
     import pydicom
 
-    uids = []
+    files_by_series = {}
     for root, _dirs, files in os.walk(dicom_dir):
         for name in files:
             path = os.path.join(root, name)
@@ -36,9 +44,38 @@ def _seriesInstanceUIDs(dicom_dir):
             except Exception:
                 continue
             uid = getattr(dataset, "SeriesInstanceUID", None)
-            if uid and str(uid) not in uids:
-                uids.append(str(uid))
-    return uids
+            if uid:
+                files_by_series.setdefault(str(uid), []).append(path)
+    return files_by_series
+
+
+def _selectHighestConfidenceLoadables(loadables_by_plugin):
+    """
+    Keep only the highest-confidence selected loadable(s) per series.
+
+    Same policy as Slicer's DICOM browser, but works without the DICOM
+    database (the SeriesInstanceUID is read from the file itself).
+    """
+    import pydicom
+
+    loadables_by_series = {}
+    for loadables in loadables_by_plugin.values():
+        for loadable in loadables:
+            if not loadable.selected:
+                continue
+            try:
+                dataset = pydicom.dcmread(
+                    loadable.files[0], stop_before_pixels=True
+                )
+                series_uid = str(getattr(dataset, "SeriesInstanceUID", ""))
+            except Exception:
+                series_uid = ""
+            loadables_by_series.setdefault(series_uid, []).append(loadable)
+
+    for loadables in loadables_by_series.values():
+        highest = max(loadable.confidence for loadable in loadables)
+        for loadable in loadables:
+            loadable.selected = loadable.confidence == highest
 
 
 class DicomApiFetcherLogic(ScriptedLoadableModuleLogic):
@@ -61,8 +98,8 @@ class DicomApiFetcherLogic(ScriptedLoadableModuleLogic):
         progress_callback=None,
     ):
         """
-        Download DICOM data using *client*, import it into the Slicer DICOM
-        database, and load the downloaded series into the scene.
+        Download DICOM data using *client* and load it directly into the
+        scene (no DICOM database involved).
 
         Two download modes:
 
@@ -71,11 +108,6 @@ class DicomApiFetcherLogic(ScriptedLoadableModuleLogic):
           "serieID"}`` downloaded through the ArchiMed hierarchy methods.
         * ``item_ids`` - a list of flat item IDs downloaded through the
           generic ``fetch_item`` interface (ZIP/manifest strategies).
-
-        Loading targets exactly the downloaded series (by SeriesInstanceUID),
-        so re-importing data that is already in the database still displays
-        it. For non-DICOM downloads it falls back to loading only newly
-        imported patients.
 
         Returns the list of loaded node IDs.
         """
@@ -124,53 +156,30 @@ class DicomApiFetcherLogic(ScriptedLoadableModuleLogic):
                     f"Download did not produce a DICOM folder: {dicom_dir}"
                 )
 
+            files_by_series = _groupFilesBySeries(dicom_dir)
+            if not files_by_series:
+                raise RuntimeError(
+                    f"No DICOM files found in downloaded data: {dicom_dir}"
+                )
+
             if progress_callback:
-                progress_callback("Importing into DICOM database...")
-            # Remember which series we downloaded so we can load exactly
-            # those, even if their patient was already in the database.
-            series_uids = _seriesInstanceUIDs(dicom_dir)
-            self._ensureDicomDatabase()
-            patients_before = set(slicer.dicomDatabase.patients())
-            DICOMUtils.importDicom(dicom_dir, slicer.dicomDatabase)
+                progress_callback("Examining DICOM data...")
+            loadables_by_plugin, load_enabled = (
+                DICOMUtils.getLoadablesFromFileLists(
+                    list(files_by_series.values())
+                )
+            )
+            if not load_enabled:
+                raise RuntimeError(
+                    "No Slicer DICOM plugin could load the downloaded data."
+                )
+
+            # Same default as the DICOM browser: one interpretation per series.
+            _selectHighestConfidenceLoadables(loadables_by_plugin)
 
             if progress_callback:
                 progress_callback("Loading into scene...")
-            if series_uids:
-                loaded_node_ids = DICOMUtils.loadSeriesByUID(series_uids)
-                return loaded_node_ids or []
-
-            # Fallback for non-DICOM downloads: load only newly imported
-            # patients (never the whole database).
-            new_patient_uids = [
-                uid
-                for uid in slicer.dicomDatabase.patients()
-                if uid not in patients_before
-            ]
-            if not new_patient_uids:
-                if progress_callback:
-                    progress_callback(
-                        "No new patient after import "
-                        "(data may already be in the database)."
-                    )
-                return []
-
-            loaded_node_ids = []
-            for uid in new_patient_uids:
-                loaded_node_ids.extend(DICOMUtils.loadPatientByUID(uid))
-
-            return loaded_node_ids
+            return DICOMUtils.loadLoadables(loadables_by_plugin)
         finally:
-            # Imported files have been copied into the DICOM database.
+            # Data is loaded into the scene; nothing references the files.
             shutil.rmtree(temp_root, ignore_errors=True)
-
-    def _ensureDicomDatabase(self):
-        """Make sure Slicer's DICOM database is available."""
-        if slicer.dicomDatabase is not None:
-            return
-
-        # Opening the DICOM module initializes the database.
-        slicer.util.selectModule("DICOM")
-        slicer.app.processEvents()
-
-        if slicer.dicomDatabase is None:
-            raise RuntimeError("Unable to initialize the Slicer DICOM database.")

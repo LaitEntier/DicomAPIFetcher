@@ -1,7 +1,7 @@
 # DICOM API Fetcher
 
-A 3D Slicer extension that fetches DICOM images from a remote HTTP API, imports
-them into the Slicer DICOM database, and loads the selected series into the scene.
+A 3D Slicer extension that fetches DICOM images from a remote HTTP API and
+loads the selected series directly into the scene (no DICOM database involved).
 
 ## Features
 
@@ -13,8 +13,9 @@ them into the Slicer DICOM database, and loads the selected series into the scen
 * Hierarchical tree browser (for ArchiMed): fetch the studies, then lazily expand a study to see its exams and an exam to see its series.
 * Select any mix of studies, exams, or series (extended selection) and import exactly that data.
 * Adapts to your API by changing endpoint templates in the module UI.
-* Imports downloaded DICOMs into Slicer's DICOM database.
-* Auto-loads the newly imported patient(s) into the scene.
+* Loads the downloaded series directly into the scene through Slicer's DICOM
+  plugins (the Slicer DICOM database is not used; temporary files are deleted
+  after loading).
 * Built-in login against `POST /api/login` (form-encoded credentials) with automatic token capture.
 * Optional API token that can be sent as a Bearer header, a custom header, or a query parameter.
 
@@ -39,8 +40,8 @@ them into the Slicer DICOM database, and loads the selected series into the scen
 6. Expand a study to load its exams, then expand an exam to load its series
    (children are fetched on demand).
 7. Select one or more studies / exams / series.
-8. Click **Import & Load selected** — exactly the selected data is downloaded,
-   imported, and loaded.
+8. Click **Import & Load selected** — exactly the selected data is downloaded
+   and loaded into the scene.
 
 For the **ZIP archive** and **JSON manifest** strategies, set the **List
 endpoint** (e.g. `/api/db/final/studies`) and **Fetch endpoint** instead of a
