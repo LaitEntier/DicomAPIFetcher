@@ -8,21 +8,24 @@ Usage
 -----
 
 1. Open the module from the *DICOM* category.
-2. Configure the API base URL (you will be prompted the first time you click
-   **Fetch** if none is saved).
-3. Choose the API strategy (and the zone for ArchiMed3-web).
-4. Optionally paste an API token and select how it should be sent.
-5. Click **Fetch** to list the available studies.
-6. Expand a study to browse its exams, and an exam to browse its series.
-7. Select one or more studies / exams / series and click **Import & Load**
+2. Enter the API base URL, your username and password, then click **Login**
+   (the returned token is stored and reused automatically).
+3. Click **Fetch** to list the available studies.
+4. Expand a study to browse its exams, and an exam to browse its series.
+5. Select one or more studies / exams / series and click **Import & Load**
    to load them directly into the scene (nothing is stored in the Slicer
    DICOM database).
+
+Advanced settings (API strategy, zone, endpoints, SSL, token handling) are
+hidden behind the collapsed **Developer mode** section and default to the
+ArchiMed3-web configuration.
 """
 
 import os
 import sys
 
 import qt
+import ctk
 import slicer
 from slicer.ScriptedLoadableModule import (
     ScriptedLoadableModule,
@@ -90,93 +93,110 @@ class DicomApiFetcherWidget(ScriptedLoadableModuleWidget):
         self.layout.setContentsMargins(8, 8, 8, 8)
         self.layout.setSpacing(6)
 
-        # --- Configuration group ---
-        config_group = qt.QGroupBox("API configuration")
-        config_layout = qt.QFormLayout(config_group)
+        # --- Connection group ---
+        connection_group = qt.QGroupBox("Connection")
+        connection_layout = qt.QFormLayout(connection_group)
 
         self.baseUrlLineEdit = qt.QLineEdit()
         self.baseUrlLineEdit.setPlaceholderText(
             "https://recharme-pr01:8443/ArchiMed3-web"
         )
-        config_layout.addRow("API base URL:", self.baseUrlLineEdit)
+        connection_layout.addRow("API base URL:", self.baseUrlLineEdit)
+
+        self.usernameLineEdit = qt.QLineEdit()
+        self.usernameLineEdit.setPlaceholderText("Username")
+        connection_layout.addRow("Username:", self.usernameLineEdit)
+
+        self.passwordLineEdit = qt.QLineEdit()
+        self.passwordLineEdit.setPlaceholderText("Password")
+        self.passwordLineEdit.setEchoMode(qt.QLineEdit.Password)
+        connection_layout.addRow("Password:", self.passwordLineEdit)
+
+        self.loginButton = qt.QPushButton("Login")
+        connection_layout.addRow(self.loginButton)
+
+        self.layout.addWidget(connection_group)
+
+        # --- Developer mode (collapsible, hidden by default) ---
+        self.developerCollapsibleButton = ctk.ctkCollapsibleButton(
+            "Developer mode"
+        )
+        self.developerCollapsibleButton.collapsed = True
+        developer_layout = qt.QFormLayout(self.developerCollapsibleButton)
+
+        # Subtle warning banner shown whenever the section is expanded
+        warning_widget = qt.QWidget()
+        warning_layout = qt.QHBoxLayout(warning_widget)
+        warning_layout.setContentsMargins(0, 0, 0, 0)
+        warning_icon = qt.QLabel()
+        warning_icon.setPixmap(
+            slicer.app.style()
+            .standardIcon(qt.QStyle.SP_MessageBoxWarning)
+            .pixmap(16, 16)
+        )
+        warning_label = qt.QLabel(
+            "Advanced settings - only change these if you know what "
+            "you are doing."
+        )
+        warning_label.setStyleSheet("font-style: italic;")
+        warning_label.wordWrap = True
+        warning_layout.addWidget(warning_icon)
+        warning_layout.addWidget(warning_label, 1)
+        developer_layout.addRow(warning_widget)
 
         self.ignoreSslCheckBox = qt.QCheckBox(
             "Ignore SSL certificate errors (self-signed certificate)"
         )
         self.ignoreSslCheckBox.setChecked(True)
-        config_layout.addRow(self.ignoreSslCheckBox)
+        developer_layout.addRow(self.ignoreSslCheckBox)
 
         self.clientTypeComboBox = qt.QComboBox()
         self.clientTypeComboBox.addItem("ZIP archive", "zip")
         self.clientTypeComboBox.addItem("JSON manifest", "manifest")
         self.clientTypeComboBox.addItem("ArchiMed3-web", "archimed")
-        config_layout.addRow("API strategy:", self.clientTypeComboBox)
+        developer_layout.addRow("API strategy:", self.clientTypeComboBox)
 
         self.zoneLabel = qt.QLabel("Zone:")
         self.zoneComboBox = qt.QComboBox()
         self.zoneComboBox.addItem("final", "final")
         self.zoneComboBox.addItem("trash", "trash")
-        config_layout.addRow(self.zoneLabel, self.zoneComboBox)
+        developer_layout.addRow(self.zoneLabel, self.zoneComboBox)
 
         self.listEndpointLabel = qt.QLabel("List endpoint:")
         self.listEndpointLineEdit = qt.QLineEdit()
         self.listEndpointLineEdit.setPlaceholderText("/api/db/final/studies")
-        config_layout.addRow(self.listEndpointLabel, self.listEndpointLineEdit)
+        developer_layout.addRow(self.listEndpointLabel, self.listEndpointLineEdit)
 
         self.fetchEndpointLabel = qt.QLabel("Fetch endpoint:")
         self.fetchEndpointLineEdit = qt.QLineEdit()
         self.fetchEndpointLineEdit.setPlaceholderText(
             "/studies/{id}/download or /api/db/final/studies/{id}"
         )
-        config_layout.addRow(self.fetchEndpointLabel, self.fetchEndpointLineEdit)
-
-        self.layout.addWidget(config_group)
-
-        # --- Login group ---
-        login_group = qt.QGroupBox("Login")
-        login_layout = qt.QFormLayout(login_group)
-
-        self.usernameLineEdit = qt.QLineEdit()
-        self.usernameLineEdit.setPlaceholderText("Username")
-        login_layout.addRow("Username:", self.usernameLineEdit)
-
-        self.passwordLineEdit = qt.QLineEdit()
-        self.passwordLineEdit.setPlaceholderText("Password")
-        self.passwordLineEdit.setEchoMode(qt.QLineEdit.Password)
-        login_layout.addRow("Password:", self.passwordLineEdit)
-
-        self.loginButton = qt.QPushButton("Login")
-        login_layout.addRow(self.loginButton)
-
-        self.layout.addWidget(login_group)
-
-        # --- Token group ---
-        token_group = qt.QGroupBox("Authentication (optional)")
-        token_layout = qt.QFormLayout(token_group)
+        developer_layout.addRow(self.fetchEndpointLabel, self.fetchEndpointLineEdit)
 
         self.tokenLineEdit = qt.QLineEdit()
-        self.tokenLineEdit.setPlaceholderText("Paste your API token here")
+        self.tokenLineEdit.setPlaceholderText("Filled automatically after login")
         self.tokenLineEdit.setEchoMode(qt.QLineEdit.Password)
-        token_layout.addRow("API token:", self.tokenLineEdit)
+        developer_layout.addRow("API token:", self.tokenLineEdit)
 
         self.tokenModeComboBox = qt.QComboBox()
         self.tokenModeComboBox.addItem("No token", "none")
         self.tokenModeComboBox.addItem("Authorization: Bearer header", "bearer")
         self.tokenModeComboBox.addItem("Custom header", "header")
         self.tokenModeComboBox.addItem("Query parameter", "query")
-        token_layout.addRow("Send token as:", self.tokenModeComboBox)
+        developer_layout.addRow("Send token as:", self.tokenModeComboBox)
 
         self.tokenNameLineEdit = qt.QLineEdit()
         self.tokenNameLineEdit.setPlaceholderText(
             "Authorization (raw token) / X-API-Key / token"
         )
-        token_layout.addRow("Header/query name:", self.tokenNameLineEdit)
+        developer_layout.addRow("Header/query name:", self.tokenNameLineEdit)
 
         self.showTokenCheckBox = qt.QCheckBox("Show token")
         self.showTokenCheckBox.connect("stateChanged(int)", self.onShowTokenChanged)
-        token_layout.addRow(self.showTokenCheckBox)
+        developer_layout.addRow(self.showTokenCheckBox)
 
-        self.layout.addWidget(token_group)
+        self.layout.addWidget(self.developerCollapsibleButton)
 
         # --- Fetch / browse section ---
         self.fetchButton = qt.QPushButton("Fetch studies / series")
@@ -226,7 +246,7 @@ class DicomApiFetcherWidget(ScriptedLoadableModuleWidget):
         """Restore persisted settings."""
         settings = qt.QSettings()
         self.baseUrlLineEdit.text = settings.value(self.SETTINGS_BASE_URL, "")
-        client_type = settings.value(self.SETTINGS_CLIENT_TYPE, "zip")
+        client_type = settings.value(self.SETTINGS_CLIENT_TYPE, "archimed")
         for index in range(self.clientTypeComboBox.count):
             if self.clientTypeComboBox.itemData(index) == client_type:
                 self.clientTypeComboBox.currentIndex = index
@@ -238,10 +258,12 @@ class DicomApiFetcherWidget(ScriptedLoadableModuleWidget):
             self.SETTINGS_FETCH_ENDPOINT, ""
         )
         self.tokenLineEdit.text = settings.value(self.SETTINGS_TOKEN, "")
-        token_mode = settings.value(self.SETTINGS_TOKEN_MODE, "none")
+        token_mode = settings.value(self.SETTINGS_TOKEN_MODE, "header")
         token_mode_index = self._tokenModeIndex(token_mode)
         self.tokenModeComboBox.currentIndex = token_mode_index
-        self.tokenNameLineEdit.text = settings.value(self.SETTINGS_TOKEN_NAME, "")
+        self.tokenNameLineEdit.text = settings.value(
+            self.SETTINGS_TOKEN_NAME, "Authorization"
+        )
         ignore_ssl = settings.value(self.SETTINGS_IGNORE_SSL, "true")
         self.ignoreSslCheckBox.setChecked(str(ignore_ssl).lower() != "false")
         zone = settings.value(self.SETTINGS_ZONE, "final")
