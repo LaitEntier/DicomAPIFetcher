@@ -118,9 +118,8 @@ class DicomApiFetcherWidget(ScriptedLoadableModuleWidget):
         self.layout.addWidget(connection_group)
 
         # --- Developer mode (collapsible, hidden by default) ---
-        self.developerCollapsibleButton = ctk.ctkCollapsibleButton(
-            "Developer mode"
-        )
+        self.developerCollapsibleButton = ctk.ctkCollapsibleButton()
+        self.developerCollapsibleButton.text = "Developer mode"
         self.developerCollapsibleButton.collapsed = True
         developer_layout = qt.QFormLayout(self.developerCollapsibleButton)
 
@@ -129,11 +128,14 @@ class DicomApiFetcherWidget(ScriptedLoadableModuleWidget):
         warning_layout = qt.QHBoxLayout(warning_widget)
         warning_layout.setContentsMargins(0, 0, 0, 0)
         warning_icon = qt.QLabel()
-        warning_icon.setPixmap(
-            slicer.app.style()
-            .standardIcon(qt.QStyle.SP_MessageBoxWarning)
-            .pixmap(16, 16)
-        )
+        try:
+            warning_icon.setPixmap(
+                slicer.app.style()
+                .standardIcon(qt.QStyle.SP_MessageBoxWarning)
+                .pixmap(16, 16)
+            )
+        except Exception:
+            warning_icon.setText("(!)")
         warning_label = qt.QLabel(
             "Advanced settings - only change these if you know what "
             "you are doing."
