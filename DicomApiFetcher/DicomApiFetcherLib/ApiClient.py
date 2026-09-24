@@ -11,7 +11,7 @@ The ``BaseApiClient`` defines two operations:
   DICOM files for one item into ``output_dir`` and returns the folder that
   contains the DICOM files.
 
-Two concrete clients are provided:
+Three concrete clients are provided:
 
 * ``ZipApiClient`` - the API returns a JSON list and each item is downloaded as
   a ZIP archive of DICOM files.
@@ -67,11 +67,14 @@ Manifest fetch endpoint::
     {"files": ["https://host/file1.dcm", "https://host/file2.dcm"]}
 """
 
+import concurrent.futures
 import json
 import os
 import re
 import shutil
 import ssl
+import time
+import urllib.error
 import urllib.request
 import zipfile
 from abc import ABCMeta, abstractmethod
@@ -91,12 +94,18 @@ class BaseApiClient(metaclass=ABCMeta):
         token_mode="none",
         token_name=None,
         verify_ssl=True,
+        max_workers=6,
+        download_retries=2,
+        retry_delay=0.5,
     ):
         self.timeout = timeout
         self.token = token or ""
         self.token_mode = (token_mode or "none").lower()
         self.token_name = token_name or ""
         self.verify_ssl = verify_ssl
+        self.max_workers = max(1, int(max_workers or 1))
+        self.download_retries = max(0, int(download_retries or 0))
+        self.retry_delay = max(0.0, float(retry_delay or 0.0))
 
     def login(self, base_url, username, password, login_endpoint="/api/login"):
         """
@@ -191,11 +200,126 @@ class BaseApiClient(metaclass=ABCMeta):
             return json.loads(response.read().decode("utf-8"))
 
     def _download_file(self, url, dest_path):
-        """Download *url* to *dest_path*."""
-        request = self._build_request(url, accept="*/*")
-        with self._urlopen(request) as response:
-            with open(dest_path, "wb") as out:
-                shutil.copyfileobj(response, out)
+        """Download *url* to *dest_path* through a temporary ``.part`` file."""
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        temporary_path = dest_path + ".part"
+        try:
+            request = self._build_request(url, accept="*/*")
+            with self._urlopen(request) as response:
+                with open(temporary_path, "wb") as out:
+                    shutil.copyfileobj(response, out)
+            os.replace(temporary_path, dest_path)
+        finally:
+            if os.path.exists(temporary_path):
+                try:
+                    os.remove(temporary_path)
+                except OSError:
+                    pass
+
+    @staticmethod
+    def _isFatalDownloadError(error):
+        """Return True for HTTP errors that should stop the batch immediately."""
+        return isinstance(error, urllib.error.HTTPError) and error.code in (
+            400,
+            401,
+            403,
+            404,
+        )
+
+    def _download_file_with_retry(self, url, dest_path):
+        """Download one file, retrying transient failures before giving up."""
+        attempts = self.download_retries + 1
+        last_error = None
+        for attempt in range(1, attempts + 1):
+            try:
+                self._download_file(url, dest_path)
+                return
+            except urllib.error.HTTPError as error:
+                # Authentication and missing-file failures will affect every
+                # remaining request. Do not retry them hundreds of times.
+                if self._isFatalDownloadError(error):
+                    raise
+                last_error = error
+                if attempt < attempts and self.retry_delay:
+                    time.sleep(self.retry_delay * attempt)
+            except Exception as error:  # urllib raises several exception types
+                last_error = error
+                if attempt < attempts and self.retry_delay:
+                    time.sleep(self.retry_delay * attempt)
+        raise last_error
+
+    def _download_files_parallel(
+        self, downloads, progress_callback=None, progress_label="Downloading files"
+    ):
+        """
+        Download ``[(url, destination_path), ...]`` with bounded concurrency.
+
+        Returns destination paths in input order. All files are retried; if
+        any permanent failures remain, the import fails instead of silently
+        producing an incomplete DICOM series.
+        """
+        total = len(downloads)
+        if total == 0:
+            return []
+
+        results = [None] * total
+        failures = []
+        completed = 0
+
+        def report_progress():
+            if progress_callback:
+                progress_callback(f"{progress_label} {completed}/{total}...")
+
+        def download_one(index, url, dest_path):
+            self._download_file_with_retry(url, dest_path)
+            return index, dest_path
+
+        worker_count = min(self.max_workers, total)
+        if worker_count == 1:
+            for index, (url, dest_path) in enumerate(downloads):
+                try:
+                    _, results[index] = download_one(index, url, dest_path)
+                except Exception as error:
+                    if self._isFatalDownloadError(error):
+                        raise RuntimeError(
+                            f"Download failed for {url}: {error}"
+                        ) from error
+                    failures.append((url, error))
+                completed += 1
+                report_progress()
+        else:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=worker_count
+            ) as executor:
+                futures = {
+                    executor.submit(download_one, index, url, dest_path): index
+                    for index, (url, dest_path) in enumerate(downloads)
+                }
+                for future in concurrent.futures.as_completed(futures):
+                    future_index = futures[future]
+                    try:
+                        index, dest_path = future.result()
+                        results[index] = dest_path
+                    except Exception as error:
+                        if self._isFatalDownloadError(error):
+                            for pending_future in futures:
+                                pending_future.cancel()
+                            raise RuntimeError(
+                                f"Download failed for "
+                                f"{downloads[future_index][0]}: {error}"
+                            ) from error
+                        failures.append((downloads[future_index][0], error))
+                    completed += 1
+                    report_progress()
+
+        if failures:
+            details = "; ".join(
+                f"{url}: {error}" for url, error in failures[:3]
+            )
+            raise RuntimeError(
+                f"Failed to download {len(failures)}/{total} file(s). {details}"
+            )
+        return results
 
     @abstractmethod
     def list_items(self, base_url, list_endpoint=None):
@@ -203,7 +327,14 @@ class BaseApiClient(metaclass=ABCMeta):
         raise NotImplementedError
 
     @abstractmethod
-    def fetch_item(self, base_url, item_id, output_dir, fetch_endpoint=None):
+    def fetch_item(
+        self,
+        base_url,
+        item_id,
+        output_dir,
+        fetch_endpoint=None,
+        progress_callback=None,
+    ):
         """Download item *item_id* and return the DICOM folder path."""
         raise NotImplementedError
 
@@ -267,19 +398,29 @@ class ZipApiClient(BaseApiClient):
         data = self._request_json(url)
         return [self._item_to_dict(item) for item in self._normalize_list(data)]
 
-    def fetch_item(self, base_url, item_id, output_dir, fetch_endpoint=None):
+    def fetch_item(
+        self,
+        base_url,
+        item_id,
+        output_dir,
+        fetch_endpoint=None,
+        progress_callback=None,
+    ):
         endpoint = (fetch_endpoint or self.DEFAULT_FETCH_ENDPOINT).replace(
             "{id}", str(item_id)
         )
         url = self._get_full_url(base_url, endpoint)
 
+        if progress_callback:
+            progress_callback(f"Downloading ZIP archive for item {item_id}...")
         zip_path = os.path.join(output_dir, "download.zip")
-        self._download_file(url, zip_path)
+        self._download_file_with_retry(url, zip_path)
 
         dicom_dir = os.path.join(output_dir, "dicoms")
         os.makedirs(dicom_dir, exist_ok=True)
         with zipfile.ZipFile(zip_path, "r") as zf:
             zf.extractall(dicom_dir)
+        os.remove(zip_path)
 
         return dicom_dir
 
@@ -296,7 +437,14 @@ class ManifestApiClient(BaseApiClient):
         data = self._request_json(url)
         return [self._item_to_dict(item) for item in self._normalize_list(data)]
 
-    def fetch_item(self, base_url, item_id, output_dir, fetch_endpoint=None):
+    def fetch_item(
+        self,
+        base_url,
+        item_id,
+        output_dir,
+        fetch_endpoint=None,
+        progress_callback=None,
+    ):
         endpoint = (fetch_endpoint or self.DEFAULT_FETCH_ENDPOINT).replace(
             "{id}", str(item_id)
         )
@@ -310,6 +458,8 @@ class ManifestApiClient(BaseApiClient):
         dicom_dir = os.path.join(output_dir, "dicoms")
         os.makedirs(dicom_dir, exist_ok=True)
 
+        downloads = []
+        used_names = set()
         for index, entry in enumerate(files):
             if isinstance(entry, dict):
                 file_url = entry.get("url", "")
@@ -321,12 +471,20 @@ class ManifestApiClient(BaseApiClient):
             if not file_url:
                 raise RuntimeError(f"Manifest entry {index} has no URL.")
 
+            file_name = os.path.basename(str(file_name))
             if not file_name:
                 file_name = os.path.basename(file_url) or f"image_{index:04d}.dcm"
+            if file_name in used_names:
+                file_name = f"{index:04d}_{file_name}"
+            used_names.add(file_name)
 
-            dest_path = os.path.join(dicom_dir, file_name)
-            self._download_file(file_url, dest_path)
+            downloads.append((file_url, os.path.join(dicom_dir, file_name)))
 
+        self._download_files_parallel(
+            downloads,
+            progress_callback=progress_callback,
+            progress_label=f"Downloading files for item {item_id}",
+        )
         return dicom_dir
 
 
@@ -425,6 +583,8 @@ class ArchiMedApiClient(BaseApiClient):
         dicom_dir = os.path.join(output_dir, "dicoms")
         os.makedirs(dicom_dir, exist_ok=True)
 
+        downloads = []
+        used_names = set()
         for index, entry in enumerate(files):
             if isinstance(entry, dict):
                 file_id = entry.get("fileID")
@@ -432,18 +592,25 @@ class ArchiMedApiClient(BaseApiClient):
             else:
                 file_id = entry
                 file_name = ""
+            file_name = os.path.basename(str(file_name))
             dest_name = (
                 f"{file_id}_{file_name}" if file_name else f"file_{file_id}.dcm"
             )
-            if progress_callback:
-                progress_callback(
-                    f"Downloading file {index + 1}/{len(files)}"
-                    f" of serie {serie_id}..."
+            if dest_name in used_names:
+                dest_name = f"{index:04d}_{dest_name}"
+            used_names.add(dest_name)
+            downloads.append(
+                (
+                    self._file_stream_url(base_url, file_id),
+                    os.path.join(dicom_dir, dest_name),
                 )
-            self._download_file(
-                self._file_stream_url(base_url, file_id),
-                os.path.join(dicom_dir, dest_name),
             )
+
+        self._download_files_parallel(
+            downloads,
+            progress_callback=progress_callback,
+            progress_label=f"Downloading files for serie {serie_id}",
+        )
         return dicom_dir
 
     def download_exam(
@@ -505,7 +672,14 @@ class ArchiMedApiClient(BaseApiClient):
                 item["id"] = f"{study_id}/{item['id']}"
         return items
 
-    def fetch_item(self, base_url, item_id, output_dir, fetch_endpoint=None):
+    def fetch_item(
+        self,
+        base_url,
+        item_id,
+        output_dir,
+        fetch_endpoint=None,
+        progress_callback=None,
+    ):
         template = fetch_endpoint or self.DEFAULT_FETCH_ENDPOINT
 
         # Honour a custom zone if the template addresses one.
@@ -520,5 +694,16 @@ class ArchiMedApiClient(BaseApiClient):
             study_id, only_exam_id = item_id, None
 
         if only_exam_id is not None:
-            return self.download_exam(base_url, study_id, only_exam_id, output_dir)
-        return self.download_study(base_url, study_id, output_dir)
+            return self.download_exam(
+                base_url,
+                study_id,
+                only_exam_id,
+                output_dir,
+                progress_callback=progress_callback,
+            )
+        return self.download_study(
+            base_url,
+            study_id,
+            output_dir,
+            progress_callback=progress_callback,
+        )

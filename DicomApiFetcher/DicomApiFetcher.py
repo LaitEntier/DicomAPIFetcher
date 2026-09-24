@@ -22,7 +22,12 @@ ArchiMed3-web configuration.
 """
 
 import os
+import queue
+import shutil
 import sys
+import threading
+import time
+import traceback
 
 import qt
 import ctk
@@ -44,6 +49,7 @@ from DicomApiFetcherLib.ApiClient import (
     ZipApiClient,
 )
 from DicomApiFetcherLib.DicomApiFetcherLogic import DicomApiFetcherLogic
+from DicomApiFetcherLib.DownloadCache import DownloadCache
 
 
 # -----------------------------------------------------------------------------
@@ -81,10 +87,15 @@ class DicomApiFetcherWidget(ScriptedLoadableModuleWidget):
     SETTINGS_TOKEN_NAME = "DicomApiFetcher/tokenName"
     SETTINGS_IGNORE_SSL = "DicomApiFetcher/ignoreSslErrors"
     SETTINGS_ZONE = "DicomApiFetcher/zone"
+    SETTINGS_CACHE_ENABLED = "DicomApiFetcher/cacheEnabled"
 
     def __init__(self, parent=None):
         ScriptedLoadableModuleWidget.__init__(self, parent)
         self.logic = DicomApiFetcherLogic()
+        self._lastProgressEventTime = 0.0
+        self._downloadWorker = None
+        self._downloadQueue = None
+        self._downloadTimer = None
 
     def setup(self):
         ScriptedLoadableModuleWidget.setup(self)
@@ -200,6 +211,24 @@ class DicomApiFetcherWidget(ScriptedLoadableModuleWidget):
 
         self.layout.addWidget(self.developerCollapsibleButton)
 
+        # --- Local cache ---
+        cache_group = qt.QGroupBox("Local cache")
+        cache_layout = qt.QHBoxLayout(cache_group)
+        self.cacheEnabledCheckBox = qt.QCheckBox("Cache downloaded DICOM files")
+        self.cacheEnabledCheckBox.setChecked(True)
+        self.cacheEnabledCheckBox.setToolTip(
+            "Reuse completed downloads in Slicer's user data directory. "
+            "Cached DICOM files are stored locally and are not encrypted."
+        )
+        cache_layout.addWidget(self.cacheEnabledCheckBox, 1)
+
+        self.clearCacheButton = qt.QPushButton("Clear cache")
+        self.clearCacheButton.setToolTip(
+            "Delete all DICOM files cached by this module on this machine."
+        )
+        cache_layout.addWidget(self.clearCacheButton)
+        self.layout.addWidget(cache_group)
+
         # --- Fetch / browse section ---
         self.fetchButton = qt.QPushButton("Fetch studies / series")
         self.layout.addWidget(self.fetchButton)
@@ -231,6 +260,10 @@ class DicomApiFetcherWidget(ScriptedLoadableModuleWidget):
         self.loginButton.connect("clicked(bool)", self.onLoginButton)
         self.fetchButton.connect("clicked(bool)", self.onFetchButton)
         self.importButton.connect("clicked(bool)", self.onImportButton)
+        self.clearCacheButton.connect("clicked(bool)", self.onClearCacheButton)
+        self.cacheEnabledCheckBox.connect(
+            "stateChanged(int)", self.onCacheEnabledChanged
+        )
         self.clientTypeComboBox.connect(
             "currentIndexChanged(int)", self.onStrategyChanged
         )
@@ -243,6 +276,13 @@ class DicomApiFetcherWidget(ScriptedLoadableModuleWidget):
 
         self._loadSettings()
         self._updateStrategyVisibility()
+
+    def cleanup(self):
+        """Stop UI polling when the module widget is destroyed/reloaded."""
+        if self._downloadTimer:
+            self._downloadTimer.stop()
+            self._downloadTimer = None
+        ScriptedLoadableModuleWidget.cleanup(self)
 
     def _loadSettings(self):
         """Restore persisted settings."""
@@ -268,6 +308,12 @@ class DicomApiFetcherWidget(ScriptedLoadableModuleWidget):
         )
         ignore_ssl = settings.value(self.SETTINGS_IGNORE_SSL, "true")
         self.ignoreSslCheckBox.setChecked(str(ignore_ssl).lower() != "false")
+        cache_enabled = settings.value(self.SETTINGS_CACHE_ENABLED, "true")
+        self.cacheEnabledCheckBox.blockSignals(True)
+        self.cacheEnabledCheckBox.setChecked(
+            str(cache_enabled).lower() != "false"
+        )
+        self.cacheEnabledCheckBox.blockSignals(False)
         zone = settings.value(self.SETTINGS_ZONE, "final")
         zone_index = self.zoneComboBox.findData(zone)
         if zone_index >= 0:
@@ -295,6 +341,10 @@ class DicomApiFetcherWidget(ScriptedLoadableModuleWidget):
         settings.setValue(
             self.SETTINGS_IGNORE_SSL,
             "true" if self.ignoreSslCheckBox.isChecked() else "false",
+        )
+        settings.setValue(
+            self.SETTINGS_CACHE_ENABLED,
+            "true" if self.cacheEnabledCheckBox.isChecked() else "false",
         )
         settings.setValue(self.SETTINGS_ZONE, self.zoneComboBox.currentData)
 
@@ -355,11 +405,45 @@ class DicomApiFetcherWidget(ScriptedLoadableModuleWidget):
             not busy and len(self._selectedImportableItems()) > 0
         )
         self.progressBar.setVisible(busy)
+        self.itemsTreeWidget.setEnabled(not busy)
+        self.cacheEnabledCheckBox.setEnabled(not busy)
+        self.clearCacheButton.setEnabled(not busy)
 
-    def _updateProgress(self, message):
-        """Update the status label and process pending UI events."""
+    def _updateProgress(self, message, force=False):
+        """Update status while limiting expensive UI event processing."""
         self.statusLabel.text = message
-        slicer.app.processEvents()
+        now = time.monotonic()
+        if force or now - self._lastProgressEventTime >= 0.15:
+            self._lastProgressEventTime = now
+            slicer.app.processEvents()
+
+    def onCacheEnabledChanged(self, _state):
+        """Persist the cache preference immediately."""
+        self._saveSettings()
+
+    def onClearCacheButton(self):
+        """Delete all cached downloads after user confirmation."""
+        if self._downloadWorker and self._downloadWorker.is_alive():
+            slicer.util.warningDisplay(
+                "Please wait for the current download to finish."
+            )
+            return
+
+        cache_dir = self.logic.defaultCacheDirectory()
+        confirmed = slicer.util.confirmYesNoDisplay(
+            "Delete all DICOM files cached by this module?\n\n"
+            f"Cache directory:\n{cache_dir}",
+            "Clear DICOM API Fetcher cache",
+        )
+        if not confirmed:
+            return
+
+        try:
+            DownloadCache(cache_dir).clear()
+            self.statusLabel.text = "Download cache cleared."
+        except Exception as e:
+            self.statusLabel.text = f"Error clearing cache: {e}"
+            slicer.util.errorDisplay(f"Failed to clear cache:\n{e}")
 
     def onShowTokenChanged(self, state):
         """Toggle token visibility."""
@@ -651,7 +735,7 @@ class DicomApiFetcherWidget(ScriptedLoadableModuleWidget):
             self._setBusy(False)
 
     def onImportButton(self):
-        """Download, import, and load the selected item(s)."""
+        """Download selected data in the background, then load it in Slicer."""
         selected = self._filterNestedSelection(self._selectedImportableItems())
         if not selected:
             slicer.util.warningDisplay("Please select an item to import.")
@@ -664,26 +748,126 @@ class DicomApiFetcherWidget(ScriptedLoadableModuleWidget):
         self._saveSettings()
         self._setBusy(True)
 
+        client = self._currentClient()
+        node_data = [item.data(0, qt.Qt.UserRole) for item in selected]
+        if node_data[0].get("strategy") == "archimed":
+            archimed_nodes = node_data
+            item_ids = None
+            fetch_endpoint = None
+        else:
+            archimed_nodes = None
+            item_ids = [data["id"] for data in node_data]
+            fetch_endpoint = self.fetchEndpointLineEdit.text.strip() or None
+
+        cache_dir = (
+            self.logic.defaultCacheDirectory()
+            if self.cacheEnabledCheckBox.isChecked()
+            else None
+        )
+        self._downloadQueue = queue.Queue()
+        self._downloadWorker = threading.Thread(
+            target=self._downloadWorkerMain,
+            args=(
+                self.logic,
+                self._downloadQueue,
+                client,
+                base_url,
+                item_ids,
+                fetch_endpoint,
+                archimed_nodes,
+                cache_dir,
+            ),
+            daemon=True,
+        )
+        self._downloadTimer = qt.QTimer()
+        self._downloadTimer.setInterval(100)
+        self._downloadTimer.connect("timeout()", self._pollDownloadQueue)
+        self._downloadTimer.start()
+        self._updateProgress("Starting DICOM download...", force=True)
+        self._downloadWorker.start()
+
+    @staticmethod
+    def _downloadWorkerMain(
+        logic,
+        download_queue,
+        client,
+        base_url,
+        item_ids,
+        fetch_endpoint,
+        archimed_nodes,
+        cache_dir,
+    ):
+        """Run network/cache work without touching Qt or the Slicer scene."""
+        def report_progress(message):
+            download_queue.put(("progress", message))
+
         try:
-            client = self._currentClient()
-            node_data = [item.data(0, qt.Qt.UserRole) for item in selected]
-            if node_data[0].get("strategy") == "archimed":
-                loaded_node_ids = self.logic.fetchAndLoad(
-                    client,
-                    base_url,
-                    archimed_nodes=node_data,
-                    progress_callback=self._updateProgress,
-                )
+            cache_manager = DownloadCache(cache_dir) if cache_dir else None
+            result = logic.fetchDicomData(
+                client,
+                base_url,
+                item_ids=item_ids,
+                fetch_endpoint=fetch_endpoint,
+                archimed_nodes=archimed_nodes,
+                progress_callback=report_progress,
+                cache_manager=cache_manager,
+            )
+            download_queue.put(("success", result))
+        except Exception as e:
+            download_queue.put(
+                ("error", (str(e), traceback.format_exc()))
+            )
+
+    def _pollDownloadQueue(self):
+        """Apply worker progress and completion on Slicer's main thread."""
+        download_queue = self._downloadQueue
+        if download_queue is None:
+            return
+
+        latest_progress = None
+        final_result = None
+        while True:
+            try:
+                message_type, payload = download_queue.get_nowait()
+            except queue.Empty:
+                break
+            if message_type == "progress":
+                latest_progress = payload
             else:
-                item_ids = [data["id"] for data in node_data]
-                fetch_endpoint = self.fetchEndpointLineEdit.text.strip() or None
-                loaded_node_ids = self.logic.fetchAndLoad(
-                    client,
-                    base_url,
-                    item_ids=item_ids,
-                    fetch_endpoint=fetch_endpoint,
-                    progress_callback=self._updateProgress,
-                )
+                final_result = (message_type, payload)
+
+        if latest_progress and final_result is None:
+            # The timer is already running on the UI thread; avoid re-entering
+            # the event loop for every background progress message.
+            self.statusLabel.text = latest_progress
+
+        if final_result is None:
+            return
+
+        if self._downloadTimer:
+            self._downloadTimer.stop()
+
+        message_type, payload = final_result
+        if message_type == "error":
+            message, details = payload
+            print(details)
+            self.statusLabel.text = f"Error: {message}"
+            slicer.util.errorDisplay(
+                f"Failed to download DICOM data:\n{message}"
+            )
+            self._resetDownloadState()
+            self._setBusy(False)
+            return
+
+        self._finishImport(payload)
+
+    def _finishImport(self, download_result):
+        """Load downloaded data on the main thread and clean temporary data."""
+        dicom_dirs, temp_root = download_result
+        try:
+            loaded_node_ids = self.logic.loadDicomData(
+                dicom_dirs, progress_callback=self._updateProgress
+            )
             if loaded_node_ids:
                 self.statusLabel.text = (
                     f"Loaded {len(loaded_node_ids)} node(s) into the scene."
@@ -696,7 +880,16 @@ class DicomApiFetcherWidget(ScriptedLoadableModuleWidget):
             self.statusLabel.text = f"Error: {e}"
             slicer.util.errorDisplay(f"Failed to import/load DICOM data:\n{e}")
         finally:
+            if temp_root:
+                shutil.rmtree(temp_root, ignore_errors=True)
+            self._resetDownloadState()
             self._setBusy(False)
+
+    def _resetDownloadState(self):
+        """Release completed download worker state."""
+        self._downloadWorker = None
+        self._downloadQueue = None
+        self._downloadTimer = None
 
 
 # -----------------------------------------------------------------------------

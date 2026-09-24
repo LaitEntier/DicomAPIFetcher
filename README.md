@@ -13,9 +13,11 @@ loads the selected series directly into the scene (no DICOM database involved).
 * Hierarchical tree browser (for ArchiMed): fetch the studies, then lazily expand a study to see its exams and an exam to see its series.
 * Select any mix of studies, exams, or series (extended selection) and import exactly that data.
 * Adapts to your API by changing endpoint templates in the module UI.
+* Downloads individual files in parallel (six connections by default), retries transient failures, and writes only completed files.
+* Runs network downloads in a background thread while keeping DICOM examination and scene loading on Slicer's main thread.
+* Optional persistent download cache avoids transferring unchanged studies, exams, series, or manifest/ZIP items again. Cached data can be cleared from the module UI.
 * Loads the downloaded series directly into the scene through Slicer's DICOM
-  plugins (the Slicer DICOM database is not used; temporary files are deleted
-  after loading).
+  plugins (the Slicer DICOM database is not used).
 * Built-in login against `POST /api/login` (form-encoded credentials) with automatic token capture.
 * Optional API token that can be sent as a Bearer header, a custom header, or a query parameter.
 
@@ -41,13 +43,40 @@ loads the selected series directly into the scene (no DICOM database involved).
    (children are fetched on demand).
 7. Select one or more studies / exams / series.
 8. Click **Import & Load selected** — exactly the selected data is downloaded
-   and loaded into the scene.
+   in the background and loaded into the scene.
+
+## Performance and local cache
+
+ArchiMed exposes one HTTP stream per DICOM file. The supplied OpenAPI
+specification does not provide a study/exam/series ZIP or bulk HTTP download
+endpoint, so the ArchiMed strategy parallelizes these per-file requests instead.
+The generic ZIP strategy remains available for APIs that already support a bulk
+archive.
+
+Downloads use six concurrent connections by default. Each file is downloaded to
+a `.part` file, retried after transient failures, and renamed only after it is
+complete. If a file still cannot be downloaded, the import fails rather than
+silently loading an incomplete series.
+
+When **Cache downloaded DICOM files** is enabled (the default), completed
+selections are stored in Slicer's user-specific data directory under
+`DicomApiFetcherCache`. A cache entry is reused only if its completion manifest
+and every listed file are present. Metadata browsing still queries the server,
+but a repeated import of the same cached study, exam, series, or item does not
+download its files again.
+
+Use **Clear cache** to delete all cached DICOM files. The cache does not
+currently expire entries automatically. Cached data is stored unencrypted on the
+local machine; disable the cache or clear it when using a shared or otherwise
+sensitive workstation. When the cache is disabled, downloaded files are
+temporary and are deleted after loading.
 
 For the **ZIP archive** and **JSON manifest** strategies, set the **List
 endpoint** (e.g. `/api/db/final/studies`) and **Fetch endpoint** instead of a
 zone; the tree then shows a flat list of items.
 
-The API base URL, chosen strategy, zone, and token are saved in Slicer's settings.
+The API base URL, chosen strategy, zone, cache preference, and token are saved
+in Slicer's settings.
 
 ## Authentication
 
@@ -158,7 +187,8 @@ DicomApiFetcher/
 │   ├── CMakeLists.txt
 │   ├── DicomApiFetcher.py              # Module and UI
 │   ├── DicomApiFetcherLib/
-│   │   ├── ApiClient.py                # HTTP API adapters (incl. login)
+│   │   ├── ApiClient.py                # Parallel HTTP API adapters (incl. login)
+│   │   ├── DownloadCache.py            # Manifest-validated persistent download cache
 │   │   └── DicomApiFetcherLogic.py     # Download / import / load logic
 │   └── Resources/
 │       └── Icons/
