@@ -126,8 +126,19 @@ class BaseApiClient(metaclass=ABCMeta):
                 "Accept": "application/json",
             },
         )
-        with self._urlopen(request) as response:
-            body = response.read().decode("utf-8")
+        try:
+            with self._urlopen(request) as response:
+                body = response.read().decode("utf-8")
+        except urllib.error.HTTPError as e:
+            # Surface the server's explanation (e.g. reason for a 401).
+            try:
+                detail = e.read().decode("utf-8").strip()
+            except Exception:
+                detail = ""
+            message = f"HTTP {e.code} {e.reason} (POST {url})"
+            if detail:
+                message += f": {detail}"
+            raise RuntimeError(message) from e
 
         try:
             payload = json.loads(body)
